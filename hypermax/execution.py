@@ -8,6 +8,7 @@ import random
 import time
 import datetime
 import os
+import fcntl
 
 
 class Execution:
@@ -194,6 +195,23 @@ class Execution:
 
         return False
 
+    def handle_stdout(self, proc_stream, my_buffer, echo_streams=True, log_file=None):
+        """A little inline function to handle the stdout business. """
+        # fcntl makes readline non-blocking so it raises an IOError when empty
+        try:
+            for s in iter(proc_stream.readline, ''):   # replace '' with b'' for Python 3
+                s = str(s, 'utf8')
+                if len(s) > 0:
+                    my_buffer.append(s)
+
+                    if echo_streams:
+                        sys.stdout.write(s)
+
+                    if log_file:
+                        log_file.write(s)
+        except IOError:
+            pass
+
     def run(self):
         """
             Run the model, return the results.
@@ -206,16 +224,12 @@ class Execution:
 
         if self.config['type'] == 'python_function' or self.config['type'] == 'remote':
             process = self.startSubprocess()
-            output = ''
+            fl = fcntl.fcntl(process.stdout, fcntl.F_GETFL)
+            fcntl.fcntl(process.stdout, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+            output = []
             while process.returncode is None and (not self.scriptToken or self.scriptToken not in output) and 'no process found' not in output:
                 process.poll()
-                nextChars = str(process.stdout.read(), 'utf8')
-                for nextChar in nextChars:
-                    if nextChar == chr(127):
-                        output = output[:-1] # Erase the last character from the output.
-                    else:
-                        output += nextChar
-                # print(output)
+                self.handle_stdout(process.stdout, output)
                 try:
                     if self.shouldKillProcess():
                         self.killed = True
@@ -229,13 +243,13 @@ class Execution:
                 time.sleep(0.002)
 
             if self.killed:
-                output += str(process.stdout.read(), 'utf8')
+                output.append(str(process.stdout.read(), 'utf8'))
                 self.result = {"status": "fail", "loss": self.config['auto_kill_loss'], "log": output, "error": "Model was automatically killed.",
                                "time": (datetime.datetime.now() - self.startTime).total_seconds()}
                 self.process = None
                 return self.result
 
-            output += str(process.stdout.read(), 'utf8')
+            output = "".join(output)
             # print(output)
 
             if self.config['type'] == 'python_function':
